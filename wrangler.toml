@@ -1,0 +1,4 @@
+# Minimale Wrangler-config voor Cloudflare Pages
+# De projectnaam wordt tijdens CI geïnjecteerd (zie .gitlab-ci.yml)
+
+pages_build_output_dir = "dist"

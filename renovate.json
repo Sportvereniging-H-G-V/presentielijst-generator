@@ -1,0 +1,25 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended"],
+  "recreateWhen": "always",
+  "rebaseWhen": "auto",
+  "dependencyDashboard": true,
+  "rangeStrategy": "replace",
+  "assignees": ["renovate-bot"],
+  "reviewers": ["rubenrikk"],
+  "lockFileMaintenance": {
+    "enabled": false
+  },
+  "packageRules": [
+    {
+      "description": "Bundel alle dependency updates in één PR",
+      "matchManagers": ["npm", "dockerfile", "github-actions", "gitlabci"],
+      "groupName": "all dependencies",
+      "assignees": ["renovate-bot"],
+      "reviewers": ["rubenrikk"]
+    }
+  ],
+  "timezone": "Europe/Amsterdam",
+  "prConcurrentLimit": 3,
+  "prHourlyLimit": 2
+}

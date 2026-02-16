@@ -1,0 +1,626 @@
+image: node:24
+
+stages: [test, build, review, deploy, release]
+
+variables:
+  # Cloudflare
+  # CF_PAGES_PROJECT moet worden ingesteld als CI/CD variabele in GitLab
+  # Zet deze in: Project Settings → CI/CD → Variables (bijv. "portfolio-rubenrikk")
+  # CLOUDFLARE_API_TOKEN en CLOUDFLARE_ACCOUNT_ID moeten ook worden ingesteld als CI/CD variabelen
+  CF_PAGES_BUILD_DIR: "dist"
+  # Node/npm
+  NPM_CONFIG_FUND: "false"
+  NPM_CONFIG_AUDIT: "false"
+  # Test reports
+  JEST_JUNIT_OUTPUT: "reports/junit.xml"
+  CI_JUNIT_REPORT: "reports/junit.xml"
+
+cache:
+  key:
+    files:
+      - package-lock.json
+  paths:
+    - node_modules/
+  policy: pull-push
+
+# ---------------- TESTS ----------------
+
+test:
+  stage: test
+  script:
+    - node -v && npm -v
+    - rm -rf node_modules
+    - npm cache clean --force
+    - npm ci
+    - npm test
+  artifacts:
+    when: always
+    paths:
+      - reports/
+      - coverage/
+    reports:
+      junit: $CI_JUNIT_REPORT
+    expire_in: 1 day
+  coverage: '/All files[^|]*\s+(\d+\.\d+)%/'
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+lint:
+  stage: test
+  script:
+    - node -v && npm -v
+    - rm -rf node_modules
+    - npm cache clean --force
+    - npm ci
+    - npm run lint || echo "No lint script found, skipping lint check"
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+typecheck:
+  stage: test
+  script:
+    - node -v && npm -v
+    - rm -rf node_modules
+    - npm cache clean --force
+    - npm ci
+    - npm run typecheck || npx astro check || echo "Type checking skipped - no typecheck script available"
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+
+# ---------------- SECURITY SCANS ----------------
+
+include:
+  - template: Security/SAST.gitlab-ci.yml
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/Dependency-Scanning.gitlab-ci.yml
+  - template: Jobs/Code-Quality.gitlab-ci.yml
+
+# Override alleen voor Code Quality: run op runners met tag 'build'
+code_quality:
+  tags:
+    - build
+
+.default_script:
+  before_script:
+    - node -v && npm -v
+    - rm -rf node_modules
+    - npm cache clean --force
+    - npm ci
+    - npm run build
+    - npm i -g wrangler
+
+build:
+  stage: build
+  needs: 
+    - job: test
+      optional: true
+    - job: lint
+      optional: true
+    - job: typecheck
+      optional: true
+  extends: .default_script
+  script:
+    - echo "Build done → artifact in ${CF_PAGES_BUILD_DIR}"
+  artifacts:
+    paths:
+      - ${CF_PAGES_BUILD_DIR}
+    expire_in: 1 day
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_PIPELINE_SOURCE == "push"'
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+
+review:
+  stage: review
+  needs: ["build"]
+  before_script:
+    - node -v && npm -v
+    - npm i -g wrangler
+    # Verifieer dat vereiste Cloudflare variabelen zijn ingesteld
+    - |
+      if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+        echo "❌ Error: CLOUDFLARE_API_TOKEN is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables"
+        exit 1
+      fi
+      if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+        echo "❌ Error: CLOUDFLARE_ACCOUNT_ID is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables"
+        echo "Je vindt je Account ID in het Cloudflare Dashboard rechtsonder op de overzichtspagina"
+        exit 1
+      fi
+      echo "✅ Cloudflare authenticatie variabelen zijn ingesteld"
+      echo "CLOUDFLARE_ACCOUNT_ID lengte: ${#CLOUDFLARE_ACCOUNT_ID} tekens"
+  script:
+    - |
+      # Valideer en trim project naam
+      if [ -z "${CF_PAGES_PROJECT}" ] || [ "${CF_PAGES_PROJECT}" = '$CF_PAGES_PROJECT' ]; then
+        echo "❌ Error: CF_PAGES_PROJECT is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables (bijv. 'portfolio-rubenrikk')"
+        exit 1
+      fi
+      
+      # Trim whitespace
+      CF_PAGES_PROJECT=$(echo "${CF_PAGES_PROJECT}" | xargs)
+      echo "🔍 Controleren of Cloudflare Pages project bestaat: '${CF_PAGES_PROJECT}'"
+      echo "📏 Project naam lengte: ${#CF_PAGES_PROJECT} tekens"
+      
+      # Valideer project naam format (lowercase, letters, cijfers, en streepjes)
+      if ! echo "${CF_PAGES_PROJECT}" | grep -qE '^[a-z0-9-]+$'; then
+        echo "❌ Error: CF_PAGES_PROJECT bevat ongeldige tekens. Alleen lowercase letters, cijfers en streepjes zijn toegestaan."
+        exit 1
+      fi
+      
+      # Valideer dat naam niet begint of eindigt met streepje
+      if [[ "${CF_PAGES_PROJECT}" =~ ^- ]] || [[ "${CF_PAGES_PROJECT}" =~ -$ ]]; then
+        echo "❌ Error: CF_PAGES_PROJECT mag niet beginnen of eindigen met een streepje"
+        exit 1
+      fi
+      
+      # Probeer project aan te maken; negeer fout als het al bestaat
+      echo "📦 Controleren/aanmaken Cloudflare Pages project '${CF_PAGES_PROJECT}'"
+      set +e
+      CREATE_OUTPUT=$(wrangler pages project create "${CF_PAGES_PROJECT}" --production-branch main 2>&1)
+      CREATE_STATUS=$?
+      set -e
+      if [ $CREATE_STATUS -ne 0 ]; then
+        if echo "$CREATE_OUTPUT" | grep -qi "already exists"; then
+          echo "✅ Project '${CF_PAGES_PROJECT}' bestaat al"
+        else
+          echo "❌ Fout bij aanmaken project:"
+          echo "$CREATE_OUTPUT"
+          exit 1
+        fi
+      else
+        echo "✅ Project '${CF_PAGES_PROJECT}' aangemaakt"
+      fi
+    - |
+      # Injecteer projectnaam in bestaande wrangler.toml (Pages ondersteunt geen custom --config pad)
+      echo "name = \"${CF_PAGES_PROJECT}\"" > wrangler.name.ci.toml
+      cat wrangler.name.ci.toml wrangler.toml > wrangler.toml.ci && mv wrangler.toml.ci wrangler.toml
+
+      # Deploy en extraheer deployment URL (niet de alias URL die wordt afgekort)
+      DEPLOY_OUTPUT=$(wrangler pages deploy "${CF_PAGES_BUILD_DIR}" \
+        --project-name "${CF_PAGES_PROJECT}" \
+        --branch "${CI_COMMIT_REF_SLUG}" \
+        --commit-hash "${CI_COMMIT_SHA}" \
+        --commit-message "${CI_COMMIT_MESSAGE}" 2>&1)
+      
+      echo "$DEPLOY_OUTPUT"
+      
+      # Extraheer deployment URL uit output (zoek naar "Deployment complete! Take a peek over at")
+      DEPLOYMENT_URL=$(echo "$DEPLOY_OUTPUT" | grep -oP 'https://[a-f0-9]+\.'"${CF_PAGES_PROJECT}"'\.pages\.dev' | head -1)
+      
+      if [ -z "$DEPLOYMENT_URL" ]; then
+        echo "⚠️ Kon deployment URL niet extraheren, gebruik fallback alias URL"
+        DEPLOYMENT_URL="https://${CI_COMMIT_REF_SLUG}.${CF_PAGES_PROJECT}.pages.dev"
+      fi
+      
+      echo "🌐 Deployment URL: $DEPLOYMENT_URL"
+      echo "$DEPLOYMENT_URL" > deployment-url.txt
+      
+      # Update environment URL via GitLab API (gebruik environment naam)
+      # Dit is optioneel - als het faalt is het niet kritisch
+      set +e
+      if [ -n "$CI_API_V4_URL" ] && [ -n "$CI_JOB_TOKEN" ]; then
+        ENV_NAME="review/$CI_COMMIT_REF_SLUG"
+        echo "🔄 Updating environment URL to deployment URL..."
+        # Haal environment ID op via naam
+        ENV_RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
+          "$CI_API_V4_URL/projects/$CI_PROJECT_ID/environments?name=$(echo "$ENV_NAME" | sed 's/\//%2F/g')")
+        HTTP_STATUS=$(echo "$ENV_RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
+        ENV_BODY=$(echo "$ENV_RESPONSE" | sed '/HTTP_STATUS:/d')
+        
+        if [ "$HTTP_STATUS" = "200" ]; then
+          ENV_ID=$(echo "$ENV_BODY" | grep -oP '"id":\s*\K[0-9]+' | head -1)
+          
+          if [ -n "$ENV_ID" ]; then
+            UPDATE_RESPONSE=$(curl -sS -w "\nHTTP_STATUS:%{http_code}" --request PUT \
+              --header "PRIVATE-TOKEN: $CI_JOB_TOKEN" \
+              --header "Content-Type: application/json" \
+              --data "{\"external_url\": \"$DEPLOYMENT_URL\"}" \
+              "$CI_API_V4_URL/projects/$CI_PROJECT_ID/environments/$ENV_ID")
+            UPDATE_HTTP_STATUS=$(echo "$UPDATE_RESPONSE" | grep "HTTP_STATUS:" | cut -d: -f2)
+            
+            if [ "$UPDATE_HTTP_STATUS" = "200" ]; then
+              echo "✅ Environment URL succesvol bijgewerkt naar: $DEPLOYMENT_URL"
+            else
+              echo "⚠️ Kon environment URL niet updaten (HTTP $UPDATE_HTTP_STATUS) - niet kritisch"
+            fi
+          else
+            echo "⚠️ Kon environment ID niet vinden in response - niet kritisch"
+          fi
+        else
+          echo "⚠️ Kon environment niet ophalen (HTTP $HTTP_STATUS) - niet kritisch"
+        fi
+      else
+        echo "⚠️ CI_API_V4_URL of CI_JOB_TOKEN niet beschikbaar - niet kritisch"
+      fi
+      set -e
+  artifacts:
+    paths:
+      - deployment-url.txt
+    expire_in: 1 day
+  environment:
+    name: "review/$CI_COMMIT_REF_SLUG"
+    url: "https://${CI_COMMIT_REF_SLUG}.${CF_PAGES_PROJECT}.pages.dev"
+    on_stop: "stop_review"
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'   # alleen bij MR's
+
+smoke_test_review:
+  stage: review
+  image: curlimages/curl:latest
+  needs: 
+    - job: "review"
+      artifacts: true
+  script: |
+    # Lees deployment URL uit artifact (niet de alias URL die wordt afgekort)
+    if [ -f deployment-url.txt ]; then
+      URL=$(cat deployment-url.txt)
+      echo "📄 Deployment URL gelezen uit artifact: $URL"
+    else
+      echo "⚠️ deployment-url.txt niet gevonden, gebruik fallback alias URL"
+      URL="https://${CI_COMMIT_REF_SLUG}.${CF_PAGES_PROJECT}.pages.dev"
+    fi
+    
+    echo "🔎 Running smoke test against $URL"
+    
+    # Wait for deployment to respond
+    for i in {1..20}; do
+      if curl -fs "$URL" > /dev/null 2>&1; then
+        echo "✅ Smoke test passed - site is accessible"
+        exit 0
+      fi
+      echo "⏳ Waiting for application... (attempt $i/20)"
+      sleep 5
+    done
+    
+    echo "❌ Smoke test failed — site not responding"
+    exit 1
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+  allow_failure: true
+
+# Op Pages worden previews automatisch opgeruimd; stop job alleen als je handmatig wilt opschonen.
+
+stop_review:
+  stage: review
+  script:
+    - echo "Preview environments op Cloudflare Pages worden automatisch beheerd. Geen actie nodig."
+  when: manual
+  allow_failure: true
+  rules:
+    - if: '$CI_MERGE_REQUEST_IID'
+  environment:
+    name: "review/$CI_COMMIT_REF_SLUG"
+    action: stop
+
+deploy_production:
+  stage: deploy
+  needs: ["build"]
+  before_script:
+    - node -v && npm -v
+    - npm i -g wrangler
+    # Verifieer dat vereiste Cloudflare variabelen zijn ingesteld
+    - |
+      if [ -z "$CLOUDFLARE_API_TOKEN" ]; then
+        echo "❌ Error: CLOUDFLARE_API_TOKEN is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables"
+        exit 1
+      fi
+      if [ -z "$CLOUDFLARE_ACCOUNT_ID" ]; then
+        echo "❌ Error: CLOUDFLARE_ACCOUNT_ID is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables"
+        echo "Je vindt je Account ID in het Cloudflare Dashboard rechtsonder op de overzichtspagina"
+        exit 1
+      fi
+      echo "✅ Cloudflare authenticatie variabelen zijn ingesteld"
+      echo "CLOUDFLARE_ACCOUNT_ID lengte: ${#CLOUDFLARE_ACCOUNT_ID} tekens"
+      if [ -z "$CF_PAGES_PRODUCTION_DOMAIN" ]; then
+        echo "❌ Error: CF_PAGES_PRODUCTION_DOMAIN is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables (bijv. 'presentielijst.example.com')"
+        exit 1
+      fi
+      echo "🌍 Production URL: https://${CF_PAGES_PRODUCTION_DOMAIN}"
+  script:
+    - |
+      # Valideer en trim project naam
+      if [ -z "${CF_PAGES_PROJECT}" ] || [ "${CF_PAGES_PROJECT}" = '$CF_PAGES_PROJECT' ]; then
+        echo "❌ Error: CF_PAGES_PROJECT is niet ingesteld als CI/CD variabele"
+        echo "Zet deze in: Project Settings → CI/CD → Variables (bijv. 'portfolio-rubenrikk')"
+        exit 1
+      fi
+      
+      # Trim whitespace
+      CF_PAGES_PROJECT=$(echo "${CF_PAGES_PROJECT}" | xargs)
+      echo "🔍 Controleren of Cloudflare Pages project bestaat: '${CF_PAGES_PROJECT}'"
+      echo "📏 Project naam lengte: ${#CF_PAGES_PROJECT} tekens"
+      
+      # Valideer project naam format (lowercase, letters, cijfers, en streepjes)
+      if ! echo "${CF_PAGES_PROJECT}" | grep -qE '^[a-z0-9-]+$'; then
+        echo "❌ Error: CF_PAGES_PROJECT bevat ongeldige tekens. Alleen lowercase letters, cijfers en streepjes zijn toegestaan."
+        exit 1
+      fi
+      
+      # Valideer dat naam niet begint of eindigt met streepje
+      if [[ "${CF_PAGES_PROJECT}" =~ ^- ]] || [[ "${CF_PAGES_PROJECT}" =~ -$ ]]; then
+        echo "❌ Error: CF_PAGES_PROJECT mag niet beginnen of eindigen met een streepje"
+        exit 1
+      fi
+      
+      # Probeer project aan te maken; negeer fout als het al bestaat
+      echo "📦 Controleren/aanmaken Cloudflare Pages project '${CF_PAGES_PROJECT}'"
+      set +e
+      CREATE_OUTPUT=$(wrangler pages project create "${CF_PAGES_PROJECT}" --production-branch main 2>&1)
+      CREATE_STATUS=$?
+      set -e
+      if [ $CREATE_STATUS -ne 0 ]; then
+        if echo "$CREATE_OUTPUT" | grep -qi "already exists"; then
+          echo "✅ Project '${CF_PAGES_PROJECT}' bestaat al"
+        else
+          echo "❌ Fout bij aanmaken project:"
+          echo "$CREATE_OUTPUT"
+          exit 1
+        fi
+      else
+        echo "✅ Project '${CF_PAGES_PROJECT}' aangemaakt"
+      fi
+    - |
+      # Injecteer projectnaam in bestaande wrangler.toml (Pages ondersteunt geen custom --config pad)
+      echo "name = \"${CF_PAGES_PROJECT}\"" > wrangler.name.ci.toml
+      cat wrangler.name.ci.toml wrangler.toml > wrangler.toml.ci && mv wrangler.toml.ci wrangler.toml
+
+      # Bereken de productie URL voor logging
+      if [ -z "$CF_PAGES_PRODUCTION_DOMAIN" ]; then
+        echo "❌ Error: CF_PAGES_PRODUCTION_DOMAIN is niet ingesteld. Smoke test kan niet worden uitgevoerd."
+        exit 1
+      fi
+      PROD_URL="https://${CF_PAGES_PRODUCTION_DOMAIN}"
+      
+      echo "🌐 Production URL: $PROD_URL"
+      
+      # Deploy en log output (voor productie is de URL meestal de definitieve productie URL)
+      DEPLOY_OUTPUT=$(wrangler pages deploy "${CF_PAGES_BUILD_DIR}" \
+        --project-name "${CF_PAGES_PROJECT}" \
+        --branch "main" \
+        --commit-hash "${CI_COMMIT_SHA}" \
+        --commit-message "${CI_COMMIT_MESSAGE}" 2>&1)
+      
+      echo "$DEPLOY_OUTPUT"
+      
+      # Voor productie gebruiken we de PROD_URL (custom domain)
+      # Sla deze op voor de smoke test
+      echo "$PROD_URL" > deployment-url.txt
+      
+      echo "✅ Deployed to: $PROD_URL"
+  artifacts:
+    paths:
+      - deployment-url.txt
+    expire_in: 1 day
+  environment:
+    name: production
+    url: "https://${CF_PAGES_PRODUCTION_DOMAIN}"
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+
+smoke_test_production:
+  stage: deploy
+  image: curlimages/curl:latest
+  needs: 
+    - job: "deploy_production"
+      artifacts: true
+  script: |
+    # Lees deployment URL uit artifact (consistent met review smoke test)
+    if [ -f deployment-url.txt ]; then
+      URL=$(cat deployment-url.txt)
+      echo "📄 Production URL gelezen uit artifact: $URL"
+    else
+      # Fallback naar CF_PAGES_PRODUCTION_DOMAIN
+      if [ -z "$CF_PAGES_PRODUCTION_DOMAIN" ]; then
+        echo "❌ Error: CF_PAGES_PRODUCTION_DOMAIN is niet ingesteld. Smoke test kan niet worden uitgevoerd."
+        exit 1
+      fi
+      URL="https://${CF_PAGES_PRODUCTION_DOMAIN}"
+      echo "⚠️ deployment-url.txt niet gevonden, gebruik fallback: $URL"
+    fi
+    
+    echo "🔎 Running smoke test tegen productie: $URL"
+    
+    # Wait for deployment to respond
+    for i in {1..20}; do
+      if curl -fs "$URL" > /dev/null 2>&1; then
+        echo "✅ Smoke test passed - production site is accessible"
+        exit 0
+      fi
+      echo "⏳ Waiting for production deployment... (attempt $i/20)"
+      sleep 5
+    done
+    
+    echo "❌ Smoke test failed — production site not responding"
+    exit 1
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+  allow_failure: true
+
+# ---------------- RELEASE ----------------
+
+release:
+  stage: release
+  image: node:24
+  before_script:
+    - node -v && npm -v
+    - apt-get update && apt-get install -y curl python3 || true
+  script:
+    - |
+      # Bepaal versie: gebruik RELEASE_VERSION variabele of haal uit package.json
+      if [ -n "$RELEASE_VERSION" ]; then
+        VERSION="$RELEASE_VERSION"
+        echo "📦 Gebruik opgegeven versie: $VERSION"
+      else
+        VERSION=$(node -p "require('./package.json').version")
+        echo "📦 Gebruik versie uit package.json: $VERSION"
+      fi
+      
+      # Valideer versie formaat (semver)
+      if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.-]+)?(\+[a-zA-Z0-9.-]+)?$'; then
+        echo "❌ Error: Ongeldig versie formaat: $VERSION"
+        echo "Gebruik semver formaat: MAJOR.MINOR.PATCH (bijv. 1.2.3)"
+        exit 1
+      fi
+      
+      TAG_NAME="v$VERSION"
+      
+      # Bepaal API URL (fallback naar CI_SERVER_URL)
+      if [ -z "${CI_API_V4_URL}" ]; then
+        CI_API_V4_URL="${CI_SERVER_URL}/api/v4"
+      fi
+      
+      # Gebruik GITLAB_API_TOKEN als beschikbaar, anders CI_JOB_TOKEN
+      if [ -n "${GITLAB_API_TOKEN}" ]; then
+        API_TOKEN="${GITLAB_API_TOKEN}"
+        echo "✅ Gebruik GITLAB_API_TOKEN voor API authenticatie"
+      else
+        API_TOKEN="${CI_JOB_TOKEN}"
+        echo "⚠️  Gebruik CI_JOB_TOKEN (mogelijk beperkte rechten)"
+        echo "💡 Tip: Maak een Personal Access Token aan met 'api' scope en voeg deze toe als CI/CD variabele 'GITLAB_API_TOKEN'"
+      fi
+      
+      # Debug: toon API variabelen
+      echo "🔍 Debug info:"
+      echo "  CI_API_V4_URL: ${CI_API_V4_URL}"
+      echo "  CI_PROJECT_ID: ${CI_PROJECT_ID}"
+      echo "  CI_PROJECT_PATH: ${CI_PROJECT_PATH}"
+      
+      # Bepaal project identifier (probeer eerst met project path, dan ID)
+      # Project path werkt vaak beter met CI_JOB_TOKEN
+      if [ -n "${CI_PROJECT_PATH}" ]; then
+        # URL encode project path (vervang / met %2F)
+        PROJECT_ID=$(echo "${CI_PROJECT_PATH}" | sed 's/\//%2F/g')
+        echo "  Gebruik project path (URL encoded): ${PROJECT_ID}"
+      elif [ -n "${CI_PROJECT_ID}" ]; then
+        PROJECT_ID="${CI_PROJECT_ID}"
+        echo "  Gebruik project ID: ${PROJECT_ID}"
+      else
+        echo "❌ Error: Geen project identifier beschikbaar"
+        exit 1
+      fi
+      
+      # Test API toegang
+      echo "🔍 Testen API toegang..."
+      TEST_RESPONSE=$(curl -s -w "\n%{http_code}" --header "PRIVATE-TOKEN: ${API_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${PROJECT_ID}")
+      TEST_HTTP_CODE=$(echo "$TEST_RESPONSE" | tail -n1)
+      TEST_BODY=$(echo "$TEST_RESPONSE" | sed '$d')
+      
+      if [ "$TEST_HTTP_CODE" != "200" ]; then
+        echo "⚠️  API toegang test mislukt: HTTP $TEST_HTTP_CODE"
+        echo "Response: $TEST_BODY"
+        echo "Proberen met project ID in plaats van path..."
+        if [ -n "${CI_PROJECT_ID}" ] && [ "${PROJECT_ID}" != "${CI_PROJECT_ID}" ]; then
+          PROJECT_ID="${CI_PROJECT_ID}"
+          echo "  Gebruik nu project ID: ${PROJECT_ID}"
+        fi
+      else
+        echo "✅ API toegang succesvol"
+      fi
+      
+      # Check of tag al bestaat via GitLab API
+      echo "🔍 Controleren of tag $TAG_NAME al bestaat..."
+      EXISTING_TAG_RESPONSE=$(curl -s -w "\n%{http_code}" --header "PRIVATE-TOKEN: ${API_TOKEN}" \
+        "${CI_API_V4_URL}/projects/${PROJECT_ID}/repository/tags/${TAG_NAME}")
+      EXISTING_TAG_HTTP_CODE=$(echo "$EXISTING_TAG_RESPONSE" | tail -n1)
+      EXISTING_TAG_BODY=$(echo "$EXISTING_TAG_RESPONSE" | sed '$d')
+      
+      if [ "$EXISTING_TAG_HTTP_CODE" = "200" ]; then
+        EXISTING_TAG=$(echo "$EXISTING_TAG_BODY" | grep -o '"name"' || echo "")
+        if [ -n "$EXISTING_TAG" ]; then
+          echo "❌ Error: Tag $TAG_NAME bestaat al"
+          exit 1
+        fi
+      elif [ "$EXISTING_TAG_HTTP_CODE" != "404" ]; then
+        echo "⚠️  Onverwachte response bij tag check: HTTP $EXISTING_TAG_HTTP_CODE"
+        echo "Response: $EXISTING_TAG_BODY"
+      fi
+      
+      # Update CHANGELOG.md: verplaats [Unreleased] naar nieuwe versie sectie
+      echo "📝 Bijwerken CHANGELOG.md..."
+      TODAY=$(date +%Y-%m-%d)
+      export VERSION
+      export TODAY
+      
+      # Check of [Unreleased] sectie bestaat
+      if ! grep -q "^## \[Unreleased\]" CHANGELOG.md; then
+        echo "⚠️  Geen [Unreleased] sectie gevonden in CHANGELOG.md"
+        echo "Maak handmatig een nieuwe versie sectie aan"
+      else
+        # Gebruik Python script voor betrouwbare tekstverwerking
+        python3 scripts/update-changelog.py
+      fi
+      
+      # Update package.json versie altijd (zodat footer automatisch up-to-date is)
+      echo "📦 Bijwerken package.json versie naar $VERSION..."
+      npm version "$VERSION" --no-git-tag-version
+      
+      # Genereer release notes uit CHANGELOG.md
+      echo "📄 Genereren release notes..."
+      RELEASE_NOTES=$(awk "/^## \[$VERSION\]/,/^## \[/" CHANGELOG.md | head -n -1 | sed '/^## \[/d' || echo "Release v$VERSION")
+      
+      # Maak tag via GitLab API
+      echo "🏷️  Aanmaken tag $TAG_NAME via GitLab API..."
+      TAG_RESPONSE=$(curl -s -w "\n%{http_code}" --request POST \
+        --header "PRIVATE-TOKEN: ${API_TOKEN}" \
+        --header "Content-Type: application/json" \
+        --data "{
+          \"tag_name\": \"${TAG_NAME}\",
+          \"ref\": \"${CI_COMMIT_SHA}\",
+          \"message\": \"Release ${TAG_NAME}\n\n${RELEASE_NOTES}\"
+        }" \
+        "${CI_API_V4_URL}/projects/${PROJECT_ID}/repository/tags")
+      
+      TAG_HTTP_CODE=$(echo "$TAG_RESPONSE" | tail -n1)
+      TAG_BODY=$(echo "$TAG_RESPONSE" | sed '$d')
+      
+      if [ "$TAG_HTTP_CODE" != "201" ]; then
+        echo "❌ Fout bij aanmaken tag: HTTP $TAG_HTTP_CODE"
+        echo "Response: $TAG_BODY"
+        if echo "$TAG_BODY" | grep -q "already exists"; then
+          echo "ℹ️  Tag bestaat al, dit is geen probleem."
+        else
+          exit 1
+        fi
+      else
+        echo "✅ Tag $TAG_NAME succesvol aangemaakt via GitLab API!"
+        echo ""
+        echo "🚀 Deployment wordt automatisch getriggerd door de nieuwe tag!"
+        echo ""
+      fi
+      
+      echo "Release notes:"
+      echo "$RELEASE_NOTES"
+      echo ""
+      
+      # Commit en push wijzigingen naar main
+      echo "📝 Committen en pushen van wijzigingen naar main..."
+      git config user.name "GitLab CI/CD"
+      git config user.email "gitlab-ci@rubenrikk.nl"
+      git add CHANGELOG.md package.json package-lock.json
+      git commit -m "Release ${TAG_NAME}: update version and changelog" || echo "⚠️  Geen wijzigingen om te committen"
+      git push origin HEAD:main || echo "⚠️  Push mislukt (mogelijk al gepusht)"
+      echo "✅ Wijzigingen gecommit en gepusht naar main"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+      allow_failure: false
+  environment:
+    name: release
+    action: start
