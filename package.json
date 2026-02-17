@@ -20,7 +20,7 @@
     "enhance": "npm install && npm run build && npm start"
   },
   "dependencies": {
-    "autoprefixer": "^10.4.20",
+    "autoprefixer": "^10.4.24",
     "file-saver": "^2.0.5",
     "jszip": "^3.10.1",
     "papaparse": "^5.4.1",
