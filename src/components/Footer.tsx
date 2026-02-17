@@ -1,7 +1,7 @@
 import packageJson from '../../package.json';
 
 const Footer = () => {
-  const issuesUrl = 'https://gitlab.rubenrikk.nl/hgv-hengelo/presentielijst-generator/-/issues';
+  const issuesUrl = 'https://github.com/Sportvereniging-H-G-V/presentielijst-generator/issues';
   
   return (
     <footer className="py-4 text-center text-sm text-gray-500">
@@ -17,7 +17,7 @@ const Footer = () => {
             rel="noopener noreferrer"
             className="text-blue-600 hover:text-blue-800 underline"
           >
-            GitLab Rubenrikk
+            GitHub
           </a>
         </div>
       </div>

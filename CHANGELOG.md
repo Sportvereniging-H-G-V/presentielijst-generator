@@ -5,6 +5,11 @@ Alle noemenswaardige wijzigingen in dit project.
 Het formaat is gebaseerd op [Keep a Changelog](https://keepachangelog.com/nl/1.0.0/),
 en dit project volgt [Semantic Versioning](https://semver.org/lang/nl/).
 
+## [1.2.3] - 2026-02-17
+
+### Gewijzigd
+- Issue-link in footer aangepast van GitLab naar GitHub.
+
 ## [1.2.2] - 2025-12-14
 
 ### Verwijderd
