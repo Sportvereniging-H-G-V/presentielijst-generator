@@ -1,4 +1,33 @@
-# Benodigde GitLab CI/CD Variabelen
+# Benodigde CI/CD Variabelen
+
+## GitHub Actions
+
+De GitHub Actions deploy-workflow vereist de volgende instellingen in **GitHub → Settings → Secrets and variables → Actions**.
+
+### Secrets (verplicht)
+
+| Naam | Omschrijving |
+|------|--------------|
+| `CLOUDFLARE_API_TOKEN` | Cloudflare API-token met *Cloudflare Pages: Edit*-recht. Aanmaken via [Cloudflare Dashboard → Mijn profiel → API-tokens](https://dash.cloudflare.com/profile/api-tokens). |
+| `CLOUDFLARE_ACCOUNT_ID` | Je Cloudflare account-ID. Te vinden rechtsonder in het Cloudflare Dashboard. |
+
+### Variables (verplicht)
+
+| Naam | Omschrijving |
+|------|--------------|
+| `CF_PAGES_PROJECT` | Naam van het Cloudflare Pages-project (bijv. `presentielijst-generator`). |
+
+### Variables (optioneel)
+
+| Naam | Omschrijving |
+|------|--------------|
+| `CF_PAGES_PRODUCTION_DOMAIN` | Eigen productiedomein (bijv. `presentie.hgvhengelo.nl`). Als dit niet is ingesteld, wordt `<project>.pages.dev` gebruikt. |
+
+> **Let op:** Zijn `CLOUDFLARE_API_TOKEN`, `CLOUDFLARE_ACCOUNT_ID` of `CF_PAGES_PROJECT` niet ingesteld, dan slaat de preview-deployment de Cloudflare-stap over (met een waarschuwing) en mislukt de productie-deployment met een duidelijke foutmelding.
+
+---
+
+## GitLab CI/CD Variabelen
 
 Deze pipeline vereist de volgende variabelen in GitLab CI/CD Settings.
 
