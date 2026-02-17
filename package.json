@@ -1,6 +1,6 @@
 {
   "name": "presentielijst-generator",
-  "version": "1.2.0",
+  "version": "1.2.3",
   "description": "Een volledig client-side React applicatie om CSV-gegevens van lessen te importeren en presentielijsten te genereren",
   "private": true,
   "type": "module",
