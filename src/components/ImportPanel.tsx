@@ -101,12 +101,20 @@ export function ImportPanel({ onImport, onPreviewReady }: ImportPanelProps) {
     }
   };
 
+  const MAX_CSV_BYTES = 10 * 1024 * 1024; // 10 MB
+
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      parseFromFile(file);
+    if (!file) return;
+    if (file.size > MAX_CSV_BYTES) {
+      setErrors([
+        `Bestand is te groot (max 10 MB). Dit bestand is ${(file.size / 1_048_576).toFixed(1)} MB.`,
+      ]);
       event.target.value = '';
+      return;
     }
+    parseFromFile(file);
+    event.target.value = '';
   };
 
   const runImport = (): boolean => {
