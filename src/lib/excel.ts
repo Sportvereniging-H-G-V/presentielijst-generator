@@ -184,10 +184,22 @@ function createExcelTrialRecord(coursecode: string, course: string, trial: Trial
   };
 }
 
+/**
+ * Prevent CSV/Excel formula injection. Spreadsheet apps treat cell values
+ * starting with =, +, -, or @ as formulas. Prefix such values with a tab
+ * character so the application renders the literal text instead.
+ */
+function sanitizeCellValue(value: string): string {
+  if (value.length > 0 && ['=', '+', '-', '@'].includes(value[0])) {
+    return `\t${value}`;
+  }
+  return value;
+}
+
 function buildRow(person: NormalizedRecord, dateColumnCount: number): BuiltRow {
-  const name = person.name;
-  const phone = person.phoneDisplay;
-  const birthdate = person.birthdate ?? person.birthdateRaw ?? '';
+  const name = sanitizeCellValue(person.name);
+  const phone = sanitizeCellValue(person.phoneDisplay);
+  const birthdate = sanitizeCellValue(person.birthdate ?? person.birthdateRaw ?? '');
   const foto = person.secretImagesFlag ? 'Nee' : '';
   const blanks = Array.from({ length: dateColumnCount }, () => '');
   return {
